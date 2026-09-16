@@ -15,9 +15,11 @@ namespace ScreenDim
         const int WM_NCHITTEST = 0x0084;
         const int HTTRANSPARENT = -1;
         const int HWND_TOPMOST = -1;
+        const int HWND_NOTOPMOST = -2;
         const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10, SWP_SHOWWINDOW = 0x40;
 
-        private byte _alphaByte;   // 0..255 per-pixel alpha we push via UpdateLayeredWindow
+        private byte _alphaByte;   // 0..255 per-pixel alpha we push via SetLayeredWindowAttributes
+        private bool _topmost = true;
 
         public OverlayForm(int screenIndex)
         {
@@ -54,8 +56,17 @@ namespace ScreenDim
             this.Visible = true;
             // per-window alpha; LWA_ALPHA applies the whole window's opacity
             SetLayeredWindowAttributes(this.Handle, 0, _alphaByte, LWA_ALPHA);
-            // keep it on top
-            SetWindowPos(this.Handle, (IntPtr)HWND_TOPMOST, 0, 0, 0, 0,
+            SetTopmost(_topmost);
+        }
+
+        // Toggle topmost. When a system menu (e.g. the tray right-click menu) is
+        // shown, we drop topmost so the menu can appear above us; we restore it
+        // once the menu closes so the overlay keeps covering fullscreen video.
+        public void SetTopmost(bool topmost)
+        {
+            _topmost = topmost;
+            IntPtr after = topmost ? (IntPtr)HWND_TOPMOST : (IntPtr)HWND_NOTOPMOST;
+            SetWindowPos(this.Handle, after, 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
 
@@ -88,6 +99,7 @@ namespace ScreenDim
         private ToolStripMenuItem _toggleMenu;
         private HotkeyForm _hotkey;            // hidden form that receives WM_HOTKEY
         private ControlPanel _panel;           // the control window
+        private bool _allowTopmost = true;     // false while a system menu (tray) is open
         private const double MIN_ALPHA = 0.05;
         private const double MAX_ALPHA = 0.90;
         internal const double STEP = 0.10;
@@ -138,15 +150,21 @@ namespace ScreenDim
             _tray.ContextMenuStrip = menu;
             _tray.DoubleClick += (s, e) => Toggle();
 
+            // When the tray right-click menu opens, drop the overlay's topmost so
+            // the menu can appear above it; restore once the menu closes.
+            menu.Opening += (s, e) => SetOverlaysTopmost(false);
+            menu.Closed += (s, e) => SetOverlaysTopmost(true);
+
             // register hotkeys on a hidden form
             _hotkey = new HotkeyForm(this);
             _hotkey.Show();      // minimized, off taskbar, keeps a live message pump for hotkeys
             _hotkey.RegisterAll();
 
-            // keep re-asserting topmost so it beats browser/fullscreen layers
+            // keep re-asserting topmost so it beats browser/fullscreen layers,
+            // but back off while a system menu (tray right-click) is open
             var t = new System.Windows.Forms.Timer();
             t.Interval = 1500;
-            t.Tick += (s, e) => { if (_on) foreach (var o in _overlays) o.TopMost = true; };
+            t.Tick += (s, e) => { if (_on && _allowTopmost) SetOverlaysTopmost(true); };
             t.Start();
 
             Apply();
@@ -179,6 +197,16 @@ namespace ScreenDim
             Apply();
         }
         internal void SetOn(bool on) { _on = on; if (_panel != null) _panel.SyncFrom(_alpha, _on); Apply(); }
+
+        // Applies the topmost state to every overlay. Used by the tray menu
+        // (to let the menu show above the overlay) and by the keep-on-top timer.
+        private void SetOverlaysTopmost(bool topmost)
+        {
+            _allowTopmost = topmost;
+            foreach (var o in _overlays)
+                o.SetTopmost(topmost);
+        }
+
         private void Apply()
         {
             foreach (var o in _overlays)
